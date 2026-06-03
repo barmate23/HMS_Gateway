@@ -7,8 +7,8 @@ pipeline {
         TARGET_CONTAINER_NAME = "hotelgateway"
         TARGET_IMAGE_NAME = "hotelgateway:latest"
 
-        HOST_PORT = "8089"
-        CONTAINER_PORT = "8089"
+        HOST_PORT = "9093"
+        CONTAINER_PORT = "9093"
     }
 
     stages {
@@ -50,7 +50,7 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                sh "docker build -t ${TARGET_IMAGE_NAME} ."
+                sh "DOCKER_BUILDKIT=0 docker build --no-cache -t ${TARGET_IMAGE_NAME} ."
             }
         }
 
@@ -60,6 +60,7 @@ pipeline {
                     docker run -d \
                     --name ${TARGET_CONTAINER_NAME} \
                     -p ${HOST_PORT}:${CONTAINER_PORT} \
+                    --restart unless-stopped \
                     ${TARGET_IMAGE_NAME}
                 """
             }
