@@ -2,11 +2,11 @@ pipeline {
     agent any
 
     environment {
-        COMPOSE_FILE = "docker-compose.uploading.yml"
+        COMPOSE_FILE = "docker-compose.hotelgateway.yml"
         REGISTRY_CONTAINER_NAME = "adminserviceregistry"
-        TARGET_SERVICE = "configurationservice"
-        TARGET_CONTAINER_NAME = "configurationservice" // container_name from your compose file
-        TARGET_IMAGE_NAME = "configurationservice:latest" // image name from your compose file
+        TARGET_SERVICE = "hotelgateway"
+        TARGET_CONTAINER_NAME = "hotelgateway" // container_name from your compose file
+        TARGET_IMAGE_NAME = "hotelgateway:latest" // image name from your compose file
     }
 
     stages {
