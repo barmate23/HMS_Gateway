@@ -2,11 +2,13 @@ pipeline {
     agent any
 
     environment {
-        COMPOSE_FILE = "docker-compose.hotelgateway.yml"
         REGISTRY_CONTAINER_NAME = "adminserviceregistry"
-        TARGET_SERVICE = "hotelgateway"
-        TARGET_CONTAINER_NAME = "hotelgateway" // container_name from your compose file
-        TARGET_IMAGE_NAME = "hotelgateway:latest" // image name from your compose file
+
+        TARGET_CONTAINER_NAME = "hotelgateway"
+        TARGET_IMAGE_NAME = "hotelgateway:latest"
+
+        HOST_PORT = "8089"
+        CONTAINER_PORT = "8089"
     }
 
     stages {
@@ -19,11 +21,10 @@ pipeline {
         stage('Docker Version') {
             steps {
                 sh 'docker --version'
-                sh 'docker compose version'
             }
         }
 
-        stage('Check Registry and Run Service') {
+        stage('Check Registry') {
             steps {
                 script {
                     def isRegistryRunning = sh(
@@ -31,22 +32,36 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    if (isRegistryRunning) {
-                        echo "${REGISTRY_CONTAINER_NAME} is running. Proceeding to build and start ${TARGET_SERVICE}..."
-
-                        // Remove existing container
-                        sh "docker rm -f ${TARGET_CONTAINER_NAME} || true"
-
-                        // Remove existing image
-                        sh "docker rmi -f ${TARGET_IMAGE_NAME} || true"
-
-                        // Build and run the service
-                        sh "docker compose -f ${COMPOSE_FILE} build ${TARGET_SERVICE}"
-                        sh "docker compose -f ${COMPOSE_FILE} up -d ${TARGET_SERVICE}"
-                    } else {
-                        error "${REGISTRY_CONTAINER_NAME} is not running. Aborting deployment of ${TARGET_SERVICE}."
+                    if (!isRegistryRunning) {
+                        error "${REGISTRY_CONTAINER_NAME} is not running. Aborting deployment."
                     }
+
+                    echo "${REGISTRY_CONTAINER_NAME} is running. Proceeding..."
                 }
+            }
+        }
+
+        stage('Remove Existing Container and Image') {
+            steps {
+                sh "docker rm -f ${TARGET_CONTAINER_NAME} || true"
+                sh "docker rmi -f ${TARGET_IMAGE_NAME} || true"
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${TARGET_IMAGE_NAME} ."
+            }
+        }
+
+        stage('Run Container') {
+            steps {
+                sh """
+                    docker run -d \
+                    --name ${TARGET_CONTAINER_NAME} \
+                    -p ${HOST_PORT}:${CONTAINER_PORT} \
+                    ${TARGET_IMAGE_NAME}
+                """
             }
         }
     }
