@@ -1,14 +1,14 @@
 version: '3.8'
 
 services:
-  configurationservice:  # ✅ Service name fixed
+  hotelgateway:  # ✅ Service name fixed
     build:
       context: .
       dockerfile: Dockerfile
-    image: configurationservice:latest  # ✅ Image name aligned
-    container_name: configurationservice
+    image: hotelgateway:latest  # ✅ Image name aligned
+    container_name: hotelgateway
     ports:
-      - "8084:8084"
+      - "9093:9093"
     networks:
       - updated_orgadmin_rmscadminnetwork
     environment:
