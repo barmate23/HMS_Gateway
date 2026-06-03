@@ -7,6 +7,8 @@ pipeline {
         TARGET_CONTAINER_NAME = "hotelgateway"
         TARGET_IMAGE_NAME = "hotelgateway:latest"
 
+        DOCKER_NETWORK = "updated_orgadmin_rmscadminnetwork"
+
         HOST_PORT = "9093"
         CONTAINER_PORT = "9093"
     }
@@ -41,6 +43,15 @@ pipeline {
             }
         }
 
+        stage('Check Docker Network') {
+            steps {
+                sh """
+                    docker network inspect ${DOCKER_NETWORK} >/dev/null 2>&1 || \
+                    docker network create ${DOCKER_NETWORK}
+                """
+            }
+        }
+
         stage('Remove Existing Container and Image') {
             steps {
                 sh "docker rm -f ${TARGET_CONTAINER_NAME} || true"
@@ -59,8 +70,12 @@ pipeline {
                 sh """
                     docker run -d \
                     --name ${TARGET_CONTAINER_NAME} \
+                    --network ${DOCKER_NETWORK} \
                     -p ${HOST_PORT}:${CONTAINER_PORT} \
                     --restart unless-stopped \
+                    -e EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://${REGISTRY_CONTAINER_NAME}:8761/eureka \
+                    -e EUREKA_CLIENT_REGISTER_WITH_EUREKA=true \
+                    -e EUREKA_CLIENT_FETCH_REGISTRY=true \
                     ${TARGET_IMAGE_NAME}
                 """
             }
