@@ -10,15 +10,17 @@ import java.util.function.Predicate;
 public class RouteValidator {
 
     public static final List<String> openApiEndpoints = List.of(
-            Const.PREFIX+Const.JWT_AUTHENTICATION_CONTROLLER,
-            Const.PREFIX+Const.RESET_PASSWORD,
-            Const.PREFIX+Const.GENERATE_OTP
+            "/api/hmsUserService/v1/auth/",
+            "/swagger-ui/",
+            "/swagger-ui.html",
+            "/v3/api-docs/",
+            "/actuator/health"
     );
 
     public Predicate<ServerHttpRequest> isSecured =
             request -> openApiEndpoints
                     .stream()
-                    .noneMatch(uri -> request.getURI().getPath().contains(uri));
+                    .noneMatch(uri -> request.getURI().getPath().startsWith(uri));
 
 
 
