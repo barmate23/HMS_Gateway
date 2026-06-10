@@ -1,213 +1,151 @@
 package com.gateway.SpringCloudGateway.config;
 
 import io.jsonwebtoken.Claims;
-import io.jsonwebtoken.ExpiredJwtException;
+import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
-import org.apache.commons.logging.Log;
-import org.springframework.beans.factory.annotation.Autowired;
+import io.jsonwebtoken.security.Keys;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
-import org.springframework.cloud.gateway.filter.factory.AbstractGatewayFilterFactory;
+import org.springframework.cloud.gateway.filter.GlobalFilter;
+import org.springframework.core.Ordered;
+import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
+import javax.crypto.SecretKey;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
-import java.util.Date;
 import java.util.List;
-import java.util.Map;
 import java.util.Random;
-import java.util.function.Function;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.util.stream.Collectors;
 
 @Component
-public class AuthenticationFilter extends AbstractGatewayFilterFactory<AuthenticationFilter.Config> {
+public class AuthenticationFilter implements GlobalFilter, Ordered {
 
-	@Autowired
-	private RouteValidator validator;
+    private static final Logger logger = LoggerFactory.getLogger(AuthenticationFilter.class);
 
+    private final RouteValidator routeValidator;
+    private final SecretKey signingKey;
 
-	private String secret;
-	private int refreshExpirationDateInMin;
-	private int jwtExpirationInMin;
+    public AuthenticationFilter(RouteValidator routeValidator, @Value("${app.security.jwt.secret}") String secret) {
+        this.routeValidator = routeValidator;
+        this.signingKey = Keys.hmacShaKeyFor(sha256(secret));
+    }
 
-	/*
-	@Value("${jwt.secret}")
-	public void setSecret(String secret) {
-		this.secret = secret;
-	}
-	*/
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        ServerHttpRequest request = exchange.getRequest();
 
-	public AuthenticationFilter() {
-		super(Config.class);
-	}
-	private static final Logger logger = LoggerFactory.getLogger(AuthenticationFilter.class);
+        if (HttpMethod.OPTIONS.equals(request.getMethod()) || !routeValidator.isSecured.test(request)) {
+            return chain.filter(exchange);
+        }
 
+        String authorization = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
+        if (authorization == null || !authorization.startsWith("Bearer ")) {
+            return unauthorized(exchange, "Missing or invalid Authorization header");
+        }
 
-	public GatewayFilter apply(Config config) {
-		return ((exchange, chain) -> {
-			return chain.filter(exchange);
-			/*
-			if (exchange.getRequest().getPath().pathWithinApplication().value().equals(Const.PREFIX+Const.JWT_AUTHENTICATION_CONTROLLER) ||
-					exchange.getRequest().getPath().pathWithinApplication().value().equals(Const.PREFIX+Const.RESET_PASSWORD) ||
-					exchange.getRequest().getPath().pathWithinApplication().value().equals(Const.PREFIX+Const.GENERATE_OTP) ||
-					exchange.getRequest().getPath().pathWithinApplication().value().equals(Const.PREFIX+Const.IS_FIRST_LOGIN)) {
-				return chain.filter(exchange);
-			} else {
-				List<String> authHeaders = exchange.getRequest().getHeaders().get(HttpHeaders.AUTHORIZATION);
-				if (authHeaders == null || authHeaders.isEmpty()) {
-					exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-					return exchange.getResponse().setComplete();
-				}
-				String authHeader = authHeaders.get(0);
-				if (authHeader != null && authHeader.startsWith("Bearer ")) {
-					String token = authHeader.substring(7);
+        String token = authorization.substring(7);
+        try {
+            Claims claims = parseClaims(token);
+            if (!"access".equals(claims.get("type", String.class))) {
+                return unauthorized(exchange, "Refresh token cannot be used for API access");
+            }
+            if (claims.getSubject() == null || claims.getSubject().isBlank() || claims.getId() == null || claims.getId().isBlank()) {
+                return unauthorized(exchange, "Token is missing required claims");
+            }
 
+            ServerHttpRequest mutatedRequest = request.mutate()
+                    .headers(headers -> {
+                        removeTrustedHeaders(headers);
+                        headers.add("X-User-Id", claims.getSubject());
+                        addIfPresent(headers, "X-Username", claims.get("username", String.class));
+                        addIfPresent(headers, "X-User-Email", claims.get("email", String.class));
+                        headers.add("X-Auth-Token-Id", claims.getId());
+                        headers.add("X-Log-Id", buildLogId());
+                        headers.add("X-User-Authorities", String.join(",", authorities(claims)));
+                    })
+                    .build();
 
+            return chain.filter(exchange.mutate().request(mutatedRequest).build());
+        } catch (JwtException | IllegalArgumentException ex) {
+            logger.warn("JWT validation failed for {}: {}", request.getPath().value(), ex.getMessage());
+            return unauthorized(exchange, "Invalid or expired token");
+        }
+    }
 
-					String username = null;
-					Boolean isValid = false;
-					// JWT Token is in the form "Bearer token". Remove Bearer word and get only the Token
-						try {
-							isValid = isValidToken(token);
-							username = getUsernameFromToken(token);
-						} catch (IllegalArgumentException e) {
+    @Override
+    public int getOrder() {
+        return -100;
+    }
 
-							exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-							exchange.getResponse().getHeaders().add("Content-Type", "text/plain");
-							return exchange.getResponse().writeWith(Mono.just(exchange.getResponse()
-									.bufferFactory().wrap("Unable to get JWT Token".getBytes())));
+    private Claims parseClaims(String token) {
+        return Jwts.parserBuilder()
+                .setSigningKey(signingKey)
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
+    }
 
-						} catch (ExpiredJwtException e) {
+    @SuppressWarnings("unchecked")
+    private List<String> authorities(Claims claims) {
+        Object rawAuthorities = claims.get("authorities");
+        if (rawAuthorities instanceof List<?>) {
+            return ((List<?>) rawAuthorities).stream().map(String::valueOf).collect(Collectors.toList());
+        }
+        return List.of("ROLE_USER");
+    }
 
-							exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-							exchange.getResponse().getHeaders().add("Content-Type", "text/plain");
-							return exchange.getResponse().writeWith(Mono.just(exchange.getResponse()
-									.bufferFactory().wrap("JWT Token has expired".getBytes())));
-						}
+    private void removeTrustedHeaders(HttpHeaders headers) {
+        headers.remove("X-User-Id");
+        headers.remove("X-Username");
+        headers.remove("X-User-Email");
+        headers.remove("X-Auth-Token-Id");
+        headers.remove("X-User-Authorities");
+        headers.remove("X-Log-Id");
+    }
 
+    private void addIfPresent(HttpHeaders headers, String name, String value) {
+        if (value != null && !value.isBlank()) {
+            headers.add(name, value);
+        }
+    }
 
-					if (isValid) {
-						Map<String, Object> claims = getAllClaimsFromToken(token);
-						Integer userId=null,orgId=null,subOrgId=null;
-						String userName=null,subModuleCode=null,subOrgName=null,orgName=null,subOrganizationCode=null;
-						if (claims.containsKey("userId"))
-							userId = Integer.parseInt(claims.get("userId").toString());
+    private Mono<Void> unauthorized(ServerWebExchange exchange, String message) {
+        exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+        exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_JSON);
 
-						if (claims.containsKey("userName"))
-							userName=claims.get("userName").toString();
+        String body = "{\"success\":false,\"message\":\"Unauthorized\",\"error\":{\"code\":\"AUTH_UNAUTHORIZED\",\"message\":\"Unauthorized\",\"details\":\""
+                + escapeJson(message)
+                + "\"}}";
+        DataBuffer buffer = exchange.getResponse().bufferFactory().wrap(body.getBytes(StandardCharsets.UTF_8));
+        return exchange.getResponse().writeWith(Mono.just(buffer));
+    }
 
-						if(claims.containsKey("orgId"))
-							orgId = Integer.parseInt(claims.get("orgId").toString());
+    private String buildLogId() {
+        int randomNumber = new Random().nextInt(999999 - 100000 + 1) + 100000;
+        return ("LG" + LocalDateTime.now().toLocalDate() + randomNumber).replace("-", "");
+    }
 
-						if(claims.containsKey("orgName"))
-							orgName = claims.get("orgName").toString();
+    private String escapeJson(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
 
-						if(claims.containsKey("subOrgId"))
-							subOrgId=Integer.parseInt(claims.get("subOrgId").toString());
-
-						if (claims.containsKey("subOrgName"))
-							subOrgName=claims.get("subOrgName").toString();
-
-						if (claims.containsKey("subOrganizationCode"))
-							subOrganizationCode=claims.get("subOrganizationCode").toString();
-
-						if (claims.containsKey("subModuleCode"))
-							subModuleCode=claims.get("subModuleCode").toString();
-
-						if(userId!=null)
-							exchange.getRequest().mutate().header("userId", userId.toString()).build();
-						if(userName!=null)
-							exchange.getRequest().mutate() .header("userName", userName) .build();
-						if(orgId!=null)
-							exchange.getRequest().mutate() .header("orgId", orgId.toString()) .build();
-						if(orgId!=null)
-							exchange.getRequest().mutate() .header("orgName", orgName) .build();
-						if (subOrgId!=null)
-							exchange.getRequest().mutate() .header("subOrgId", subOrgId.toString()) .build();
-						if (subOrgName!=null)
-							exchange.getRequest().mutate() .header("subOrgName", subOrgName) .build();
-						if (subOrganizationCode!=null)
-							exchange.getRequest().mutate() .header("subOrganizationCode", subOrganizationCode) .build();
-						if (subModuleCode!=null)
-							exchange.getRequest().mutate() .header("subModuleCode", subModuleCode) .build();
-
-						Random random = new Random();
-						int randomNumber = random.nextInt(999999 - 100000 + 1) + 100000;
-						String logId=("LG"+ LocalDateTime.now().toLocalDate()+randomNumber).trim().replaceAll("-","");
-						exchange.getRequest().mutate() .header("logId", logId) .build();
-						return chain.filter(exchange);
-					}
-				}else {
-					exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-					exchange.getResponse().getHeaders().add("Content-Type", "text/plain");
-					return exchange.getResponse().writeWith(Mono.just(exchange.getResponse()
-							.bufferFactory().wrap("JWT Token does not begin with Bearer String".getBytes())));
-
-				}
-				exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-				return exchange.getResponse().setComplete();
-			}
-			*/
-		});
-	}
-
-	public static class Config {
-
-	}
-
-
-
-	/*
-	@Value("${jwt.expirationDateInMin}")
-	public void setJwtExpirationInMin(int jwtExpirationInMin) {
-
-		this.jwtExpirationInMin = jwtExpirationInMin;
-	}
-	*/
-
-	private boolean isValidToken(String token) {
-
-//    final String username = getUsernameFromToken(token);
-		return (!isTokenExpired(token));
-		// Validate and decode the token using a library like jjwt
-		// Return true if the token is valid, false otherwise
-	}
-
-
-	public <T> T getClaimFromToken(String token, Function<Claims, T> claimsResolver) {
-		final Claims claims = getAllClaimsFromToken(token);
-		return claimsResolver.apply(claims);
-	}
-
-	private Claims getAllClaimsFromToken(String token) {
-		return Jwts.parser().setSigningKey(secret).parseClaimsJws(token).getBody();
-	}
-
-	private Boolean isTokenExpired(String token) {
-		final Date expiration = getExpirationDateFromToken(token);
-		return expiration.before(new Date());
-	}
-
-	public Date getExpirationDateFromToken(String token) {
-
-		return getClaimFromToken(token, Claims::getExpiration);
-	}
-
-	private static String removePrefix(String original, String prefix) {
-		if (original.startsWith(prefix)) {
-			return original.substring(prefix.length());
-		}
-		return original;
-	}
-
-	public String getUsernameFromToken(String token) {
-		return getClaimFromToken(token, Claims::getSubject);
-	}
+    private byte[] sha256(String value) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256 is not available", ex);
+        }
+    }
 }
