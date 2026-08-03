@@ -11,7 +11,6 @@ public class RouteValidator {
 
     public static final List<String> openApiEndpoints = List.of(
             "/api/hmsUserService/v1/auth/",
-            "/api/reportService/v1/",
             "/swagger-ui/",
             "/swagger-ui.html",
             "/v3/api-docs/",
