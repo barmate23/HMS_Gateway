@@ -65,12 +65,24 @@ public class AuthenticationFilter implements GlobalFilter, Ordered {
                 return unauthorized(exchange, "Token is missing required claims");
             }
 
+            // Extract license status claim from signed JWT payload
+            String licenseStatus = claims.get("licenseStatus", String.class);
+
+            // Gateway License Enforcement: Block unactivated or expired property access on secured routes
+            if (!routeValidator.isLicenseExempt.test(request)) {
+                if (licenseStatus != null && ("PENDING_ACTIVATION".equalsIgnoreCase(licenseStatus) || "EXPIRED".equalsIgnoreCase(licenseStatus))) {
+                    logger.warn("Blocked request to {} for user {}: property license is {}", request.getPath().value(), claims.getSubject(), licenseStatus);
+                    return forbidden(exchange, "HMS License activation required. Your property license is " + licenseStatus.toLowerCase() + ". Please enter a valid property license key.");
+                }
+            }
+
             ServerHttpRequest mutatedRequest = request.mutate()
                     .headers(headers -> {
                         removeTrustedHeaders(headers);
                         headers.add("X-User-Id", claims.getSubject());
                         addIfPresent(headers, "X-Username", claims.get("username", String.class));
                         addIfPresent(headers, "X-User-Email", claims.get("email", String.class));
+                        addIfPresent(headers, "X-License-Status", licenseStatus);
                         headers.add("X-Auth-Token-Id", claims.getId());
                         headers.add("X-Log-Id", buildLogId());
                         headers.add("X-User-Authorities", String.join(",", authorities(claims)));
@@ -110,6 +122,7 @@ public class AuthenticationFilter implements GlobalFilter, Ordered {
         headers.remove("X-User-Id");
         headers.remove("X-Username");
         headers.remove("X-User-Email");
+        headers.remove("X-License-Status");
         headers.remove("X-Auth-Token-Id");
         headers.remove("X-User-Authorities");
         headers.remove("X-Log-Id");
@@ -126,6 +139,17 @@ public class AuthenticationFilter implements GlobalFilter, Ordered {
         exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_JSON);
 
         String body = "{\"success\":false,\"message\":\"Unauthorized\",\"error\":{\"code\":\"AUTH_UNAUTHORIZED\",\"message\":\"Unauthorized\",\"details\":\""
+                + escapeJson(message)
+                + "\"}}";
+        DataBuffer buffer = exchange.getResponse().bufferFactory().wrap(body.getBytes(StandardCharsets.UTF_8));
+        return exchange.getResponse().writeWith(Mono.just(buffer));
+    }
+
+    private Mono<Void> forbidden(ServerWebExchange exchange, String message) {
+        exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
+        exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_JSON);
+
+        String body = "{\"success\":false,\"message\":\"License Activation Required\",\"error\":{\"code\":\"LICENSE_INACTIVE\",\"message\":\"License Activation Required\",\"details\":\""
                 + escapeJson(message)
                 + "\"}}";
         DataBuffer buffer = exchange.getResponse().bufferFactory().wrap(body.getBytes(StandardCharsets.UTF_8));
