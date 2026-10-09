@@ -9,8 +9,8 @@ pipeline {
 
         DOCKER_NETWORK = "updated_orgadmin_rmscadminnetwork"
 
-        HOST_PORT = "9093"
-        CONTAINER_PORT = "9093"
+        HOST_PORT = "8083"
+        CONTAINER_PORT = "8083"
     }
 
     stages {
