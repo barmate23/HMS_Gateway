@@ -8,7 +8,7 @@ services:
     image: hotelgateway:latest  # ✅ Image name aligned
     container_name: hotelgateway
     ports:
-      - "9093:9093"
+      - "8083:8083"
     networks:
       - updated_orgadmin_rmscadminnetwork
     environment:
