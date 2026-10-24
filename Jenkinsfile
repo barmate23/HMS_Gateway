@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     environment {
-        REGISTRY_CONTAINER_NAME = "adminserviceregistry"
+        REGISTRY_CONTAINER_NAME = "serviceregistry"
 
         TARGET_CONTAINER_NAME = "hotelgateway"
         TARGET_IMAGE_NAME = "hotelgateway:latest"
